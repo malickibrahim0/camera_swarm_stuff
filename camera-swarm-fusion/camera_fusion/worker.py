@@ -25,6 +25,7 @@ from .metrics_logger import CameraMetricsLogger
 from .output import CsvOutput, MqttOutput, OutputSink
 from .transforms import compute_relative_pose
 from .frame_source import FrameSource, DeviceCameraSource, RTPStreamSource, SyntheticFrameSource
+from .attempt_logger import AttemptLogger
 
 @dataclass
 class SessionSummary:
@@ -139,65 +140,77 @@ class CameraWorker:
     def run(self) -> SessionSummary:
         storage = SessionStorage(self.config.session_root, name=f"{self.config.camera_name}_session")
         session_path = storage.begin()
-        storage.write_manifest(self.config.as_dict())
+        manifest = self.config.as_dict()
+        manifest["attempt_timing"] = {
+            "clock": "time.monotonic_ns",
+            "unit": "nanoseconds",
+            "meaning": "host frame_source.read interval, not sensor exposure",
+        }
+        storage.write_manifest(manifest)
+
+        attempt_logger = AttemptLogger(storage.session_dir)
 
         metrics_logger: Optional[CameraMetricsLogger] = None
-        if self.config.metrics_enabled:
-            metrics_logger = CameraMetricsLogger(
-                storage.session_dir,
-                flush_every_n_frames=self.config.metrics_flush_every_n_frames,
+        frame_source = None
+        opened_outputs = []
+        try:
+            if self.config.metrics_enabled:
+                metrics_logger = CameraMetricsLogger(
+                    storage.session_dir,
+                    flush_every_n_frames=self.config.metrics_flush_every_n_frames,
+                )
+
+            log_file = str(Path(storage.logs_dir) / "session.log")
+            add_file_handler(self.logger, self.config.camera_name, log_file)
+
+            for out in self.outputs:
+                opened_outputs.append(out)
+                out.open(Path(storage.session_dir))
+
+            frame_source = self._build_frame_source()
+            pre = ColorFrame()
+
+            if self.config.dry_run:
+                und = NoUndistort()
+                loc = NoLocalize()
+            else:
+                K, dist, _ = load_calib(self.config.calibration_path)
+                loc = PnPLocalize(K, dist, self.config.marker_length_m)
+                und = SimpleUndistort(self.config.calibration_path) if self.config.apply_undistort else NoUndistort()
+
+            detector_state = build_detector(self.config.aruco_dict)
+
+            # Initialize LightGlue fallback if enabled
+            lightglue_fallback = None
+            if self.config.lightglue is not None and self.config.lightglue.enabled:
+                try:
+                    from .fallback import LightGlueFallback
+                    self.config.lightglue.debug_matches_dir = str(Path(storage.session_dir) / "debug_lightglue_matches")
+                    lightglue_fallback = LightGlueFallback(
+                        self.config.lightglue,
+                        self.config.aruco_dict
+                    )
+                    self.logger.info("LightGlue fallback initialized")
+                except Exception as e:
+                    self.logger.warning(f"Failed to initialize LightGlue fallback: {e}")
+                    lightglue_fallback = None
+
+            self.logger.info("session started: %s", session_path)
+            self.logger.info("config: %s", self.config.as_dict())
+
+            condition_label = os.getenv("CONDITION_LABEL", "default")
+            system_mode = (
+                "hybrid_aruco_lightglue"
+                if (lightglue_fallback is not None and self.target_ids is not None)
+                else "aruco_only"
             )
 
-        log_file = str(Path(storage.logs_dir) / "session.log")
-        add_file_handler(self.logger, self.config.camera_name, log_file)
+            frame_source.start()
+            t0 = time.time()
+            frames = 0
+            errors = 0
+            attempt_id = 0
 
-        for out in self.outputs:
-            out.open(Path(storage.session_dir))
-
-        frame_source = self._build_frame_source()
-        pre = ColorFrame()
-
-        if self.config.dry_run:
-            und = NoUndistort()
-            loc = NoLocalize()
-        else:
-            K, dist, _ = load_calib(self.config.calibration_path)
-            loc = PnPLocalize(K, dist, self.config.marker_length_m)
-            und = SimpleUndistort(self.config.calibration_path) if self.config.apply_undistort else NoUndistort()
-
-        detector_state = build_detector(self.config.aruco_dict)
-
-        # Initialize LightGlue fallback if enabled
-        lightglue_fallback = None
-        if self.config.lightglue is not None and self.config.lightglue.enabled:
-            try:
-                from .fallback import LightGlueFallback
-                self.config.lightglue.debug_matches_dir = str(Path(storage.session_dir) / "debug_lightglue_matches")
-                lightglue_fallback = LightGlueFallback(
-                    self.config.lightglue,
-                    self.config.aruco_dict
-                )
-                self.logger.info("LightGlue fallback initialized")
-            except Exception as e:
-                self.logger.warning(f"Failed to initialize LightGlue fallback: {e}")
-                lightglue_fallback = None
-
-        self.logger.info("session started: %s", session_path)
-        self.logger.info("config: %s", self.config.as_dict())
-
-        condition_label = os.getenv("CONDITION_LABEL", "default")
-        system_mode = (
-            "hybrid_aruco_lightglue"
-            if (lightglue_fallback is not None and self.target_ids is not None)
-            else "aruco_only"
-        )
-
-        frame_source.start()
-        t0 = time.time()
-        frames = 0
-        errors = 0
-
-        try:
             while True:
                 frame_loop_start = time.perf_counter()
 
@@ -208,10 +221,37 @@ class CameraWorker:
                 if self.config.max_frames and frames >= self.config.max_frames:
                     break
 
-                frame_data = frame_source.read()
+
+                attempt_id += 1
+
+                read_start_ns = time.monotonic_ns()
+                try:
+                    frame_data = frame_source.read()
+                except (Exception, KeyboardInterrupt):
+                    attempt_logger.log_attempt(
+                        attempt_id=attempt_id, frame_id=None,
+                        read_start_ns=read_start_ns,
+                        read_end_ns=time.monotonic_ns(),
+                        capture_status="capture_failed",
+                    )
+                    raise
+                read_end_ns = time.monotonic_ns()
+
+                attempt_logger.log_attempt(
+                    attempt_id=attempt_id,
+                    frame_id=frame_data[2] if frame_data is not None else None,
+                    read_start_ns=read_start_ns,
+                    read_end_ns=read_end_ns,
+                    capture_status=(
+                        "captured" if frame_data is not None
+                        else "capture_failed"
+                    ),
+                )
+
                 if frame_data is None:
                     errors += 1
                     continue
+
 
                 frame_img, timestamp_ns, frame_id = frame_data
                 capture_time = timestamp_ns / 1_000_000_000.0
@@ -509,6 +549,11 @@ class CameraWorker:
                 frames += 1
 
         finally:
+            try:
+                attempt_logger.close()
+            except Exception:
+                self.logger.exception("failed to close attempt logger")
+
             if metrics_logger is not None:
                 try:
                     metrics_logger.finalize()
@@ -516,11 +561,12 @@ class CameraWorker:
                     self.logger.exception("failed to finalize metrics logger")
 
             try:
-                frame_source.stop()
+                if frame_source is not None:
+                    frame_source.stop()
             except Exception:
                 pass
 
-            for out in self.outputs:
+            for out in opened_outputs:
                 try:
                     out.close()
                 except Exception:

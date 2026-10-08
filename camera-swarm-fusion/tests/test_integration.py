@@ -2,6 +2,7 @@ import csv
 import json
 import logging
 from pathlib import Path
+from unittest.mock import Mock
 
 import numpy as np
 
@@ -79,15 +80,14 @@ def test_pipeline_integration_full_flow(tmp_path, monkeypatch):
         ([], None, []),
     ]
 
-    fake_detector_cls = type(det._detector)
 
-    def detect_markers(self, image):
+    def detect_markers(image):
         if detect_seq:
             c, i, rej = detect_seq.pop(0)
             return list(c), i, rej
         return [], None, []
 
-    monkeypatch.setattr(fake_detector_cls, "detectMarkers", detect_markers, raising=False)
+    det._detector = Mock(detectMarkers=Mock(side_effect=detect_markers))
 
     def fake_pose(corners_in, marker_length, K, dist):
         rvec = np.array([[[0.1, 0.2, 0.3]]])
@@ -138,6 +138,7 @@ def test_pipeline_integration_full_flow(tmp_path, monkeypatch):
         rows = list(csv.reader(fh))
     assert rows[0] == [
         "frame_idx",
+        "capture_time",
         "recorded_at",
         "marker_id",
         "rvec_x",
@@ -149,10 +150,11 @@ def test_pipeline_integration_full_flow(tmp_path, monkeypatch):
         "image_path",
     ]
     assert rows[1][0] == "1"
-    assert rows[1][1] == "0.020000"
-    assert rows[1][2] == "25"
-    assert rows[1][3:6] == ["0.1", "0.2", "0.3"]
-    assert rows[1][6:9] == ["0.5", "0.6", "0.4"]
+    assert rows[1][1] == "nan"
+    assert rows[1][2] == "0.020000"
+    assert rows[1][3] == "25"
+    assert rows[1][4:7] == ["0.1", "0.2", "0.3"]
+    assert rows[1][7:10] == ["0.5", "0.6", "0.4"]
 
     assert publisher.lines[0] == ",".join(rows[0])
     assert publisher.lines[1] == ",".join(rows[1])

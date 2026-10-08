@@ -112,3 +112,19 @@ def test_cli_system_run_with_publish(tmp_path, monkeypatch, capsys):
 
     sessions = list(Path(tmp_path).glob("aruco_session_*"))
     assert sessions, "Expected a session directory when publishing is enabled"
+
+
+@pytest.fixture(autouse=True)
+def fake_cli_camera(monkeypatch):
+    from unittest.mock import MagicMock
+    import cv2
+    cap = MagicMock()
+    cap.read.return_value = (True, np.zeros((240, 320, 3), dtype=np.uint8))
+    monkeypatch.setattr(cv2, "VideoCapture", lambda *args, **kwargs: cap)
+    yield
+    # CLI tests reuse a named logger; do not retain pytest's captured streams.
+    import logging
+    logger = logging.getLogger("pipeline")
+    for handler in list(logger.handlers):
+        handler.close()
+        logger.removeHandler(handler)

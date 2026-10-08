@@ -136,7 +136,7 @@ class RecordingCsvWriter:
         """Simulate opening the CSV file."""
         self.opened = True
 
-    def append(self, *row):
+    def append(self, *row, capture_time=None):
         """Record appended rows for later inspection."""
         self.rows.append(row)
 
@@ -145,7 +145,7 @@ class RecordingCsvWriter:
         self.closed = True
 
     @classmethod
-    def to_csv_line(cls, *values):
+    def to_csv_line(cls, *values, capture_time=None):
         """Return a deterministic CSV-esque payload for publisher assertions."""
         return "|".join(str(v) for v in values)
 

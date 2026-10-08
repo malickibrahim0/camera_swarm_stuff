@@ -496,3 +496,24 @@ data/sessions/<aruco_session_YYYYMMDD_HHMMSS>/
 | `--dict` | ArUco dictionary (e.g., `4x4_50`, `4x4_100`, `5x5_50`, …). |
 | `--marker-length-m` | Marker side length in meters (needed for pose & axes). Use `0` to skip pose estimation (IDs only). |
 
+
+## Offline worker regression and acquisition accounting
+
+Run `python3 -m pytest tests -q` from this directory with real OpenCV
+(including ArUco), NumPy and pytest installed. Geometry tests use real OpenCV.
+The test suite blocks unmocked `VideoCapture`; CLI tests provide explicit fake
+cameras and publishing clients. Passing these tests is software evidence only.
+
+`CameraWorker` writes `attempts.csv` without overwriting an existing attempt log.
+Each completed read records run/attempt identity, optional cycle/pose context,
+frame ID when available, read interval endpoints and `captured` or
+`capture_failed`. A returned `None` is logged and counted; a raised read exception
+or keyboard interruption is logged as failed, then re-raised after cleanup.
+Setup failures also close the attempt log and initialized resources.
+
+New run manifests identify the attempt clock as `time.monotonic_ns`.
+`read_end_ns - read_start_ns` is host read duration, not exposure latency.
+These endpoints are neither epoch timestamps nor cross-host synchronization
+values. Earlier experimental logs used wall-clock nanoseconds; preserve them
+and do not infer their clock from column names alone. No camera timeout or
+retry-limit policy was changed. `max_frames` still counts processed frames.

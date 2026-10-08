@@ -18,11 +18,11 @@ class FakeCapture:
     def start(self) -> None:
         return None
 
-    def next_frame(self):
+    def read(self):
         self.idx += 1
         img = np.zeros((480, 640, 3), dtype=np.uint8)
         ts = "2026-02-02T10:00:00"
-        return Frame(self.idx, ts, img)
+        return img, 1_000_000_000, self.idx
 
     def stop(self) -> None:
         return None
@@ -68,7 +68,7 @@ def test_worker_with_reference_marker(tmp_path: Path):
         marker_length_m=0.05,
     )
 
-    worker = CameraWorker(cfg, capture=FakeCapture())
+    worker = CameraWorker(cfg, frame_source=FakeCapture())
 
     mock_dets = [
         Detection(0, np.zeros((4, 2)), None, None),
@@ -83,7 +83,7 @@ def test_worker_with_reference_marker(tmp_path: Path):
     with patch("camera_fusion.worker.SimpleUndistort", NoOpUndistort), patch(
         "camera_fusion.worker.load_calib",
         return_value=(np.eye(3), np.zeros((5, 1)), (640, 480)),
-    ), patch("camera_fusion.detect.detect_markers", return_value=mock_dets), patch(
+    ), patch("camera_fusion.worker.detect_markers", return_value=mock_dets), patch(
         "camera_fusion.worker.PnPLocalize.estimate", return_value=mock_poses
     ):
         summary = worker.run()
@@ -125,7 +125,7 @@ def test_worker_reference_marker_missing(tmp_path: Path):
         marker_length_m=0.05,
     )
 
-    worker = CameraWorker(cfg, capture=FakeCapture())
+    worker = CameraWorker(cfg, frame_source=FakeCapture())
 
     mock_dets = [
         Detection(1, np.zeros((4, 2)), None, None),
@@ -138,7 +138,7 @@ def test_worker_reference_marker_missing(tmp_path: Path):
     with patch("camera_fusion.worker.SimpleUndistort", NoOpUndistort), patch(
         "camera_fusion.worker.load_calib",
         return_value=(np.eye(3), np.zeros((5, 1)), (640, 480)),
-    ), patch("camera_fusion.detect.detect_markers", return_value=mock_dets), patch(
+    ), patch("camera_fusion.worker.detect_markers", return_value=mock_dets), patch(
         "camera_fusion.worker.PnPLocalize.estimate", return_value=mock_poses
     ):
         summary = worker.run()
