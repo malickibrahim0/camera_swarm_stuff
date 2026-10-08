@@ -20,12 +20,11 @@ from iiot_pipeline.strategies.localize_pnp import PnPLocalize
 from .capture import BaseCapture, SyntheticCapture, USBOpenCVCapture
 from .config import CameraConfig
 from .detect import build_detector, detect_markers
-from .frame_source import FrameSource, DeviceCameraSource, RTPStreamSource
 from .logging_utils import add_file_handler, setup_logger
 from .metrics_logger import CameraMetricsLogger
 from .output import CsvOutput, MqttOutput, OutputSink
 from .transforms import compute_relative_pose
-
+from .frame_source import FrameSource, DeviceCameraSource, RTPStreamSource, SyntheticFrameSource
 
 @dataclass
 class SessionSummary:
@@ -58,7 +57,7 @@ class CameraWorker:
     ):
         self.config = config
         self.logger = logger or setup_logger(config.camera_name)
-        
+
         # Default output with reference support if reference_id is set
         if outputs is None:
             use_ref = config.reference_id is not None
@@ -75,7 +74,7 @@ class CameraWorker:
                         logger=self.logger,
                     )
                 )
-        
+
         self.outputs = outputs
         self.capture = capture  # Kept for backward compatibility
         self.frame_source = frame_source
@@ -106,7 +105,14 @@ class CameraWorker:
         """Build a FrameSource for input frames."""
         if self.frame_source is not None:
             return self.frame_source
-        
+
+        if self.config.dry_run:
+            return SyntheticFrameSource(
+                self.config.fps,
+                self.config.width,
+                self.config.height
+            )
+
         # Determine source type from config
         source_config = self.config.source
         if source_config is None or source_config.type == "v4l2":
@@ -160,7 +166,7 @@ class CameraWorker:
             und = SimpleUndistort(self.config.calibration_path) if self.config.apply_undistort else NoUndistort()
 
         detector_state = build_detector(self.config.aruco_dict)
-        
+
         # Initialize LightGlue fallback if enabled
         lightglue_fallback = None
         if self.config.lightglue is not None and self.config.lightglue.enabled:
@@ -206,7 +212,7 @@ class CameraWorker:
                 if frame_data is None:
                     errors += 1
                     continue
-                
+
                 frame_img, timestamp_ns, frame_id = frame_data
                 capture_time = timestamp_ns / 1_000_000_000.0
                 ts_iso = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -238,18 +244,18 @@ class CameraWorker:
                 }
                 image_path = ""
                 annotated_path = ""
-                
+
                 if not self.config.no_detect and not self.config.dry_run:
                     aruco_start = time.perf_counter()
 
                     # Step 1: Run ArUco detection
                     dets = detect_markers(f.image, detector_state)
                     aruco_detected_ids = {d.marker_id for d in dets}
-                    
+
                     # Step 2: Build detected_dict for fallback
                     detected_dict = {d.marker_id: d.corners for d in dets}
                     missing_target_ids = required_ids - aruco_detected_ids
-                    
+
                     # Step 3: Attempt LightGlue recovery for missing markers
                     if lightglue_fallback is not None and len(missing_target_ids) > 0:
                         detected_dict, debug_info_list = lightglue_fallback.recover_missing(
@@ -258,13 +264,13 @@ class CameraWorker:
                             required_ids
                         )
                         fallback_stats = lightglue_fallback.get_last_frame_stats()
-                        
+
                         # Rebuild dets list from updated detected_dict
                         dets = [
                             Detection(mid, corners, None, None)
                             for mid, corners in detected_dict.items()
                         ]
-                    
+
                     # Step 4: Continue with existing pose estimation
                     if self.config.marker_lengths_m:
                         poses = loc.estimate_with_lengths(
@@ -302,11 +308,11 @@ class CameraWorker:
                     debug_sources = {}
                     for info in debug_info_list:
                         debug_sources[info.marker_id] = info.source
-                    
+
                     # Draw detected markers with color coding by source
                     for det in dets:
                         source = debug_sources.get(det.marker_id, "aruco")
-                        
+
                         # Color code: green=aruco, cyan=lg_track, magenta=lg_reacquire
                         if source == "aruco":
                             color = (0, 255, 0)  # Green
@@ -314,11 +320,11 @@ class CameraWorker:
                             color = (255, 255, 0)  # Cyan
                         else:  # lg_reacquire
                             color = (255, 0, 255)  # Magenta
-                        
+
                         # Draw marker corners
                         corners_int = det.corners.astype(np.int32)
                         cv2.polylines(draw, [corners_int], True, color, 2)
-                        
+
                         # Draw marker ID
                         # Draw marker ID
                         center = corners_int.reshape(-1, 2).mean(axis=0)
@@ -358,7 +364,7 @@ class CameraWorker:
                             pass
 
                     annotated_path = storage.save_annotated(f.idx, draw)
-                    
+
                     # Save debug frame if LightGlue debug enabled
                     if lightglue_fallback is not None and self.config.lightglue.debug_save:
                         debug_path = Path(storage.session_dir) / "debug_lightglue"
@@ -373,14 +379,14 @@ class CameraWorker:
                 # Compute reference-relative poses if reference marker is present
                 ref_visible = False
                 ref_pose_map = {}
-                
+
                 if self.config.reference_id is not None and self.config.reference_id in pose_map:
                     ref_pose = pose_map[self.config.reference_id]
                     if ref_pose is not None and ref_pose.rvec is not None and ref_pose.tvec is not None:
                         ref_visible = True
                     else:
                         ref_visible = False
-                    
+
                     for marker_id, pose in pose_map.items():
                         if marker_id == self.config.reference_id:
                             continue
@@ -409,7 +415,7 @@ class CameraWorker:
                     length_m = self.config.marker_length_m
                     if self.config.marker_lengths_m and det.marker_id in self.config.marker_lengths_m:
                         length_m = self.config.marker_lengths_m[det.marker_id]
-                    
+
                     # Get reference-relative pose if available
                     ref_rvec, ref_tvec = None, None
                     if det.marker_id in ref_pose_map:

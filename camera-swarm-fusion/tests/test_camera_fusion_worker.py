@@ -3,8 +3,14 @@ from pathlib import Path
 from camera_fusion.config import CameraConfig
 from camera_fusion.worker import CameraWorker
 
+import cv2
 
-def test_worker_dry_run_creates_session(tmp_path: Path):
+def test_worker_dry_run_creates_session(tmp_path: Path, monkeypatch):
+    def forbid_camera(*args, **kwargs):
+        raise AssertionError("dry_run attempted to open a real camera")
+
+    monkeypatch.setattr(cv2, "VideoCapture", forbid_camera)
+
     cfg = CameraConfig(
         camera_name="drycam",
         session_root=str(tmp_path),
@@ -19,6 +25,8 @@ def test_worker_dry_run_creates_session(tmp_path: Path):
     summary = worker.run()
 
     assert summary.frames_processed == 2
+    assert summary.errors == 0
     assert Path(summary.session_path).exists()
     assert Path(summary.csv_path).exists()
     assert Path(summary.log_path).exists()
+

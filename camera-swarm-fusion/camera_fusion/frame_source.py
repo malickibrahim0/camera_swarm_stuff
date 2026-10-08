@@ -19,7 +19,7 @@ import numpy as np
 
 class FrameSource(ABC):
     """Abstract base class for frame sources.
-    
+
     A frame source provides frames from various inputs: USB cameras, RTP streams, etc.
     """
 
@@ -31,7 +31,7 @@ class FrameSource(ABC):
     @abstractmethod
     def read(self) -> tuple[np.ndarray, int, int] | None:
         """Read next frame.
-        
+
         Returns:
             (frame_bgr, timestamp_ns, frame_id) tuple or None if no frame available.
             - frame_bgr: BGR image as ndarray
@@ -46,9 +46,51 @@ class FrameSource(ABC):
         ...
 
 
+class SyntheticFrameSource(FrameSource):
+    """Camera-free source for dry-run testing."""
+
+    def __init__(self, fps: int, width: int, height: int):
+        if fps <= 0 or width <= 0 or height <= 0:
+            raise ValueError("fps, width, and height must be positive")
+
+        self.fps = fps
+        self.width = width
+        self.height = height
+        self.frame_id = 0
+        self.running = False
+        self.next_read = 0.0
+
+    def start(self) -> None:
+        self.frame_id = 0
+        self.running = True
+        self.next_read = time.monotonic()
+
+    def read(self) -> tuple[np.ndarray, int, int] | None:
+        if not self.running:
+            return None
+
+        delay = self.next_read - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+
+        self.next_read = time.monotonic() + 1.0 / self.fps
+
+        self.frame_id += 1
+        image = np.zeros(
+            (self.height, self.width, 3),
+            dtype=np.uint8
+        )
+
+        return image, time.time_ns(), self.frame_id
+
+    def stop(self) -> None:
+        self.running = False
+
+
+
 class DeviceCameraSource(FrameSource):
     """USB camera source using OpenCV's V4L2 interface.
-    
+
     Wraps cv2.VideoCapture to provide a unified FrameSource interface.
     """
 
@@ -80,23 +122,23 @@ class DeviceCameraSource(FrameSource):
 
         if not self.cap.isOpened():
             raise RuntimeError(f"Failed to open camera: {self.device}")
-        
+
         self.frame_id = 0
 
     def read(self) -> tuple[np.ndarray, int, int] | None:
         """Read next frame from camera."""
         if self.cap is None:
             return None
-        
+
         ok, img = self.cap.read()
         if not ok:
             return None
 
         capture_time = time.time()
-        
+
         self.frame_id += 1
         timestamp_ns = int(capture_time * 1_000_000_000)
-        
+
         return (img, timestamp_ns, self.frame_id)
 
     def stop(self) -> None:
@@ -108,13 +150,13 @@ class DeviceCameraSource(FrameSource):
 
 class RTPStreamSource(FrameSource):
     """RTP H.264 stream source using OpenCV's GStreamer backend.
-    
+
     Receives H.264 encoded video over RTP/UDP and decodes to BGR frames.
     """
 
     def __init__(self, port: int, fps: int, width: int, height: int):
         """Initialize RTP stream source.
-        
+
         Args:
             port: UDP port to listen on for RTP packets
             fps: Expected frames per second (informational)
@@ -144,27 +186,27 @@ class RTPStreamSource(FrameSource):
             f"video/x-raw,format=BGR,width={self.width},height={self.height},pixel-aspect-ratio=1/1 ! "
             f"appsink caps=video/x-raw,format=BGR,width={self.width},height={self.height} drop=true max-buffers=1 sync=false"
         )
-        
+
         self.cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
-        
+
         if not self.cap.isOpened():
             raise RuntimeError(
                 f"Failed to open RTP stream on port {self.port}. "
                 f"Ensure GStreamer is installed: "
                 f"sudo apt-get install gstreamer1.0-plugins-good gstreamer1.0-plugins-bad"
             )
-        
+
         self.frame_id = 0
 
     def read(self) -> tuple[np.ndarray, int, int] | None:
         """Read next frame from RTP stream.
-        
+
         Returns:
             (frame_bgr, timestamp_ns, frame_id) tuple or None if no frame available.
         """
         if self.cap is None:
             return None
-        
+
         ok, img = self.cap.read()
         if not ok:
             return None
@@ -174,10 +216,10 @@ class RTPStreamSource(FrameSource):
             self._shape_logged = True
 
         capture_time = time.time()
-        
+
         self.frame_id += 1
         timestamp_ns = int(capture_time * 1_000_000_000)
-        
+
         return (img, timestamp_ns, self.frame_id)
 
     def stop(self) -> None:
