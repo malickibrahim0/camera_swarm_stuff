@@ -170,7 +170,7 @@ class CameraWorker:
             frame_source = self._build_frame_source()
             pre = ColorFrame()
 
-            if self.config.dry_run:
+            if self.config.dry_run or self.config.detection_only:
                 und = NoUndistort()
                 loc = NoLocalize()
             else:
@@ -312,7 +312,9 @@ class CameraWorker:
                         ]
 
                     # Step 4: Continue with existing pose estimation
-                    if self.config.marker_lengths_m:
+                    if self.config.detection_only:
+                        poses = []
+                    elif self.config.marker_lengths_m:
                         poses = loc.estimate_with_lengths(
                             dets,
                             self.config.marker_lengths_m,

@@ -517,3 +517,13 @@ These endpoints are neither epoch timestamps nor cross-host synchronization
 values. Earlier experimental logs used wall-clock nanoseconds; preserve them
 and do not infer their clock from column names alone. No camera timeout or
 retry-limit policy was changed. `max_frames` still counts processed frames.
+
+### Live detection without camera-specific calibration
+
+Set `detection_only: true` in JSON or pass `--detection-only` to
+`python3 -m camera_fusion.run`. This runs the normal live frame source,
+ArUco detector, storage, attempts and metrics. It bypasses calibration loading,
+undistortion and pose estimation; detection rows retain unavailable (NaN) pose
+fields. `dry_run` remains separate and uses synthetic input. Calibrated mode
+remains the default. Physical pose requires calibration for the actual camera
+and resolution. Set `target_ids` explicitly for meaningful detection metrics.

@@ -56,6 +56,7 @@ class CameraConfig:
     target_ids: Optional[list[int]] = None
     reference_id: Optional[int] = None
     marker_lengths_m: Optional[dict[int, float]] = None
+    detection_only: bool = False
     no_detect: bool = False
     dry_run: bool = False
     max_frames: Optional[int] = None
@@ -143,6 +144,7 @@ def load_config(path: str | Path) -> CameraConfig:
         if not isinstance(lengths_raw, dict):
             raise ValueError("marker_lengths_m must be a mapping of marker_id -> length_m")
         cfg.marker_lengths_m = {int(k): float(v) for k, v in lengths_raw.items()}
+    cfg.detection_only = bool(raw.get("detection_only", cfg.detection_only))
     cfg.no_detect = bool(raw.get("no_detect", cfg.no_detect))
     cfg.dry_run = bool(raw.get("dry_run", cfg.dry_run))
     cfg.max_frames = raw.get("max_frames", cfg.max_frames)

@@ -175,3 +175,51 @@ def test_wall_clock_rollback_does_not_invalidate_read_duration(tmp_path, monkeyp
     import json
     manifest = json.loads((Path(summary.session_path) / 'config.json').read_text())
     assert manifest['attempt_timing']['clock'] == 'time.monotonic_ns'
+
+
+@pytest.mark.parametrize('visible', [True, False])
+def test_detection_only_uses_real_detector_without_calibration(tmp_path, monkeypatch, visible):
+    import json
+    import camera_fusion.worker as module
+    dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    image = np.full((300, 300, 3), 255, dtype=np.uint8)
+    if visible:
+        marker = cv2.aruco.generateImageMarker(dictionary, 0, 200)
+        image[50:250, 50:250] = cv2.cvtColor(marker, cv2.COLOR_GRAY2BGR)
+    source = Mock()
+    source.read.return_value = (image, time.time_ns(), 1)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Detection-only must not load calibration or estimate pose')
+    monkeypatch.setattr(module, 'load_calib', forbidden)
+    monkeypatch.setattr(module, 'PnPLocalize', forbidden)
+    monkeypatch.setattr(module, 'SimpleUndistort', forbidden)
+    cfg = CameraConfig(session_root=str(tmp_path), detection_only=True, max_frames=1,
+                       target_ids=[0], marker_lengths_m={0: 0.035})
+    summary = CameraWorker(cfg, frame_source=source).run()
+    assert summary.frames_processed == 1
+    source.start.assert_called_once()
+    source.stop.assert_called_once()
+    session = Path(summary.session_path)
+    with Path(summary.csv_path).open(newline='') as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == int(visible)
+    if visible:
+        assert rows[0]['marker_id'] == '0'
+        assert all(rows[0][field] == 'nan' for field in ('rvec_x', 'tvec_x', 'tvec_y', 'tvec_z'))
+    with (session / 'metrics_frames.csv').open(newline='') as f:
+        metrics = next(csv.DictReader(f))
+    assert metrics['pose_recovered'] == '0'
+    assert metrics['aruco_success'] == str(int(visible))
+    assert json.loads((session / 'config.json').read_text())['detection_only'] is True
+    assert len(list((session / 'frames').glob('*.jpg'))) == 1
+
+
+def test_detection_only_config_and_cli(tmp_path):
+    import json
+    from camera_fusion.config import load_config
+    from camera_fusion.run import _build_parser, _apply_args
+    path = tmp_path / 'config.json'
+    path.write_text(json.dumps({'detection_only': True}))
+    assert load_config(path).detection_only
+    args = _build_parser().parse_args(['--config', str(path), '--detection-only'])
+    assert _apply_args(CameraConfig(), args).detection_only
